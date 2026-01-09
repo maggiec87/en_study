@@ -1,135 +1,128 @@
 import streamlit as st
+import pandas as pd
 import os
 from docx import Document
-import re
-import random
 
 # --- 页面配置 ---
-st.set_page_config(page_title="外语私教工作站", layout="wide")
+st.set_page_config(page_title="外语私教 - 综合训练系统", layout="wide")
 
-# --- 工具函数：判断是否包含中文 ---
-def contains_chinese(text):
-    return re.search(r'[\u4e00-\u9fa5]', text) is not None
+# --- 路径定义 ---
+DICT_DIR = "corpora/dictation"
+TRANS_DIR = "corpora/translation"
+DICT_AUDIO_DIR = "corpora/dictation/audio"
 
-# --- 核心函数：解析 Word 语料 ---
-def load_corpus(file_path):
-    try:
-        doc = Document(file_path)
-        # 获取所有非空行
-        lines = [para.text.strip() for para in doc.paragraphs if para.text.strip()]
-        
-        # 模式 A：听写模式需要的纯英文列表
-        english_only = [line for line in lines if not contains_chinese(line)]
-        
-        # 模式 B：回译模式需要的双语配对 (寻找 中文-英文 的组合)
-        pairs = []
-        for i in range(len(lines) - 1):
-            # 如果当前行是中文，下一行是英文，则组成一对
-            if contains_chinese(lines[i]) and not contains_chinese(lines[i+1]):
-                pairs.append({"q": lines[i], "a": lines[i+1]})
-        
-        return english_only, pairs
-    except Exception as e:
-        st.error(f"解析文件失败: {e}")
-        return [], []
+# --- 核心函数 ---
+def read_docx(file_path):
+    doc = Document(file_path)
+    return "\n".join([para.text for para in doc.paragraphs])
 
-# --- 初始化 Session State ---
-if 'current_index' not in st.session_state:
-    st.session_state.current_index = 0
-if 'shuffled_data' not in st.session_state:
-    st.session_state.shuffled_data = None
-if 'last_file_mode' not in st.session_state:
-    st.session_state.last_file_mode = ""
+@st.cache_data
+def load_excel(file_path):
+    df = pd.read_excel(file_path)
+    df.columns = ['Chinese', 'English'] + (['Audio'] if 'Audio' in df.columns or len(df.columns)>2 else [])
+    return df.to_dict('records')
 
-# --- 侧边栏 ---
-st.sidebar.title("🎧 学习设置")
-mode = st.sidebar.radio("选择模式", ["🎧 英文听写", "✍️ 中译英回译"])
+# --- 侧边栏：模式切换 ---
+st.sidebar.title("🚀 学习模式")
+mode = st.sidebar.radio("请选择：", ["🎧 听写模式 (听音写文)", "✍️ 回译模式 (全文预览+逐句练习)"])
 
-DICTATION_DIR = "corpora/dictation"
-TRANSLATION_DIR = "corpora/translation"
-folder = DICTATION_DIR if "听写" in mode else TRANSLATION_DIR
-files = [f for f in os.listdir(folder) if f.endswith('.docx')] if os.path.exists(folder) else []
-
-if not files:
-    st.warning(f"请在 {folder} 文件夹中放入 .docx 语料")
-else:
-    selected_file = st.sidebar.selectbox("选择语料文件", files)
-    file_path = os.path.join(folder, selected_file)
+# --- 逻辑 A：听写模式 ---
+if "听写" in mode:
+    st.sidebar.subheader("听写配置")
+    files = [f for f in os.listdir(DICT_DIR) if f.endswith(('.xlsx', '.xls'))]
     
-    # 加载数据
-    en_list, cn_en_pairs = load_corpus(file_path)
-    
-    # 确定当前使用的数据集
-    active_data = en_list if "听写" in mode else cn_en_pairs
-    
-    # 检查文件或模式是否切换，若切换则重置
-    current_key = f"{selected_file}_{mode}"
-    if st.session_state.last_file_mode != current_key:
-        st.session_state.current_index = 0
-        st.session_state.last_file_mode = current_key
-        st.session_state.shuffled_data = None
-
-    if not active_data:
-        st.error("语料解析失败：听写模式需要英文行；回译模式需要'中文行+英文行'的对照格式。")
+    if not files:
+        st.info("请在 corpora/dictation 放入 Excel 语料")
     else:
-        # --- 乱序逻辑 ---
-        if "回译" in mode:
-            is_random = st.sidebar.checkbox("乱序练习")
-            if is_random and st.session_state.shuffled_data is None:
-                st.session_state.shuffled_data = random.sample(active_data, len(active_data))
-            elif not is_random:
-                st.session_state.shuffled_data = None
+        selected_file = st.sidebar.selectbox("选择听写课目", files)
+        data = load_excel(os.path.join(DICT_DIR, selected_file))
         
-        display_data = st.session_state.shuffled_data if st.session_state.shuffled_data else active_data
-        total = len(display_data)
+        if 'dict_idx' not in st.session_state: st.session_state.dict_idx = 0
         
-        # --- 界面渲染 ---
-        st.title(mode)
-        st.progress((st.session_state.current_index + 1) / total)
-        st.caption(f"进度：{st.session_state.current_index + 1} / {total}")
-
-        st.write("---")
-
-        if "听写" in mode:
-            # 听写逻辑
-            current_item = display_data[st.session_state.current_index]
-            st.subheader("第一步：听音频")
-            st.info("（此处播放音频...）")
-            
-            st.subheader("第二步：拼写英文")
-            user_input = st.text_area("输入你听到的英文内容：", key=f"dict_{st.session_state.current_index}")
-            
-            with st.expander("查看英文原文"):
-                st.code(current_item)
-
+        curr = data[st.session_state.dict_idx]
+        st.title("🎧 英文听写")
+        
+        # 音频播放
+        audio_path = os.path.join(DICT_AUDIO_DIR, str(curr.get('Audio', '')))
+        if os.path.exists(audio_path):
+            st.audio(audio_path)
         else:
-            # 回译逻辑 (中译英)
-            current_item = display_data[st.session_state.current_index]
-            st.subheader("🚩 请将下句译为英文：")
-            st.warning(current_item['q']) # 显示中文
-            
-            user_input = st.text_area("在此输入英文译文：", key=f"trans_{st.session_state.current_index}")
-            
-            if st.button("检查答案"):
-                if user_input.strip().lower() == current_item['a'].strip().lower():
-                    st.success("完全正确！")
-                else:
-                    st.write("💡 参考答案：")
-                    st.success(current_item['a'])
+            st.error(f"未找到音频文件: {curr.get('Audio')}")
 
-        # --- 翻页控制 ---
-        st.write("---")
-        col1, col2, col3 = st.columns([1,1,2])
-        with col1:
-            if st.button("⬅️ 上一句"):
-                if st.session_state.current_index > 0:
-                    st.session_state.current_index -= 1
-                    st.rerun()
-        with col2:
-            if st.button("下一句 ➡️"):
-                if st.session_state.current_index < total - 1:
-                    st.session_state.current_index += 1
-                    st.rerun()
+        user_input = st.text_area("听音写英文：", key=f"dict_{st.session_state.dict_idx}")
+        
+        with st.expander("查看参考答案"):
+            st.write(f"**英文：** {curr['English']}")
+            st.write(f"**中文：** {curr['Chinese']}")
+
+        # 翻页
+        c1, c2 = st.columns(2)
+        if c1.button("上一句") and st.session_state.dict_idx > 0:
+            st.session_state.dict_idx -= 1
+            st.rerun()
+        if c2.button("下一句") and st.session_state.dict_idx < len(data)-1:
+            st.session_state.dict_idx += 1
+            st.rerun()
+
+# --- 逻辑 B：回译模式 ---
+else:
+    st.sidebar.subheader("回译配置")
+    # 获取回译目录下的所有 docx 文件作为索引
+    docx_files = [f for f in os.listdir(TRANS_DIR) if f.endswith('.docx')]
+    
+    if not docx_files:
+        st.info("请在 corpora/translation 放入 Word(全文) 和 Excel(逐句)")
+    else:
+        selected_base = st.sidebar.selectbox("选择回译课目", docx_files)
+        base_name = os.path.splitext(selected_base)[0]
+        
+        # 查找对应的 Excel 文件
+        excel_path = os.path.join(TRANS_DIR, f"{base_name}.xlsx")
+        docx_path = os.path.join(TRANS_DIR, selected_base)
+
+        # 步骤选择：预览 vs 练习
+        step = st.radio("学习步骤：", ["1. 全文预览 (Word)", "2. 逐句回译练习 (Excel)"], horizontal=True)
+
+        if "1. 全文预览" in step:
+            st.title("📖 全文通读")
+            if os.path.exists(docx_path):
+                content = read_docx(docx_path)
+                st.text_area("文章内容", content, height=400)
+            else:
+                st.error("未找到对应的 Word 文件")
+        
+        else:
+            st.title("✍️ 中译英回译")
+            if not os.path.exists(excel_path):
+                st.error(f"未找到对应的 Excel 练习表: {base_name}.xlsx")
+            else:
+                trans_data = load_excel(excel_path)
+                if 'trans_idx' not in st.session_state: st.session_state.trans_idx = 0
+                
+                # 乱序功能
+                if st.sidebar.checkbox("乱序练习"):
+                    if 'shuffled_trans' not in st.session_state:
+                        st.session_state.shuffled_trans = random.sample(trans_data, len(trans_data))
+                    display_data = st.session_state.shuffled_trans
                 else:
-                    st.balloons()
-                    st.success("本篇练习完成！")
+                    display_data = trans_data
+
+                curr = display_data[st.session_state.trans_idx]
+                
+                st.info(f"中文提示：{curr['Chinese']}")
+                user_ans = st.text_area("请输入英文翻译：", key=f"tr_{st.session_state.trans_idx}")
+                
+                if st.button("检查答案"):
+                    if user_ans.strip().lower() == str(curr['English']).strip().lower():
+                        st.success("太棒了！完全正确。")
+                    else:
+                        st.warning(f"参考答案：{curr['English']}")
+
+                # 翻页
+                c1, c2 = st.columns(2)
+                if c1.button("上一句") and st.session_state.trans_idx > 0:
+                    st.session_state.trans_idx -= 1
+                    st.rerun()
+                if c2.button("下一句") and st.session_state.trans_idx < len(display_data)-1:
+                    st.session_state.trans_idx += 1
+                    st.rerun()
